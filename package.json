@@ -1,0 +1,21 @@
+{
+  "name": "web-scraper",
+  "version": "1.0.0",
+  "description": "Web scraper for fastdeliverycarparts.com",
+  "main": "scraper.ts",
+  "type": "module",
+  "scripts": {
+    "start": "esrun scraper.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "papaparse": "^5.5.2"
+  },
+  "devDependencies": {
+    "@digitak/esrun": "^3.2.24",
+    "@types/node": "^20.9.0",
+    "@types/papaparse": "^5.3.15",
+    "typescript": "^5.2.2"
+  }
+}
