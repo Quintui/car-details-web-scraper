@@ -4,17 +4,19 @@ import * as fs from "fs/promises";
 import { URL } from "url";
 import Papa from "papaparse";
 
+// Define the structure for a scraped product
 interface Product {
-  sku: string | null;
-  siteCode: string | null;
+  sku: string | null; // Will be the product name
+  siteCode: string | null; // Original 'Detaļas kods'
   name: string | null;
   price: number | null;
-  imageUrls: string[];
+  imageUrl: string | null; // Single image URL from catalog
   productPageUrl: string | null;
   manufacturerCode: string | null;
-  isInStock: boolean;
+  isInStock: boolean; // Determined from catalog page
 }
 
+// WooCommerce CSV Row Structure
 interface WooCommerceProductRow {
   ID: string;
   Type: string;
@@ -45,7 +47,7 @@ interface WooCommerceProductRow {
   Categories: string;
   Tags: string;
   "Shipping class": string;
-  Images: string;
+  Images: string; // Single image URL
   "Download limit": string;
   "Download expiry days": string;
   Parent: string;
@@ -57,26 +59,31 @@ interface WooCommerceProductRow {
   Position: string;
 }
 
+// --- Constants ---
 const BASE_URL = "https://www.fastdeliverycarparts.com";
 const START_URL =
   "https://www.fastdeliverycarparts.com/katalogs/?cat=38,4,23,95,1107,98,8,9,13,35,70,76,40,1103,1101,3,11,5,9000000423,9000000421,9000000422,32,14,19,16,15,31,20,99,97,46,47,71,41,80,85,79,78,84,81,1106,39,49,37,50,1116,54,51,105,57,52,58,59,60,67,68,30,1102,75,1104,66,101,102,64,109,36,18,34,1109,69,65,72,1108,2,104,42,6,1117,29,1118,43,17,7,45,10,44,24,28,22,106,108,55,96,92,1105,93,12,1112,94,86,88,89,87,91,77,63,21,103,27,61,107,25,1110,1113,1111,1114,56,1115";
 const OUTPUT_CSV_FILE = "woocommerce_products.csv";
-const MAX_CATALOG_PAGES = 1000;
-const DELAY_BETWEEN_PRODUCT_REQUESTS_MS = 500;
+const MAX_CATALOG_PAGES = 1000; // Adjust as needed for full scrape
+const DELAY_BETWEEN_PRODUCT_REQUESTS_MS = 100; // Delay for fetching details page (manufacturer code)
 const AXIOS_TIMEOUT_MS = 15000;
 
+// --- Helper Functions ---
+
+/**
+ * Fetches and parses details (manufacturer code) from a single product page.
+ * Stock and Images are NOT fetched here.
+ * @param url The URL of the product page.
+ * @returns An object containing the manufacturer code.
+ */
 async function scrapeProductDetails(url: string): Promise<{
   manufacturerCode: string | null;
-  isInStock: boolean;
-  imageUrls: string[];
 }> {
   let manufacturerCode: string | null = null;
-  let isInStock = false;
-  const imageUrls: string[] = [];
 
   if (!url) {
     console.warn("Skipping detail scraping due to missing URL.");
-    return { manufacturerCode, isInStock, imageUrls };
+    return { manufacturerCode };
   }
 
   console.log(` -> Fetching details from: ${url}`);
@@ -97,71 +104,10 @@ async function scrapeProductDetails(url: string): Promise<{
 
     const $ = cheerio.load(html);
 
+    // Get Manufacturer Code
     manufacturerCode = $("#tabs2-horizontal").text().trim() || null;
 
-    const availabilityDiv = $("#single-item-card-right-column-blue-aviability");
-    if (availabilityDiv.length > 0) {
-      availabilityDiv.find("span.green").each((_idx, el) => {
-        const stockText = $(el).text().trim();
-        if (/\d+/.test(stockText)) {
-          isInStock = true;
-          return false;
-        }
-      });
-    } else {
-      console.warn(` -> Availability info div not found on ${url}`);
-    }
-
-    let mainImageUrl: string | null = null;
-    const mainImgElement = $("#single-item-card-left-column-main-picture img");
-    const mainImgSrc = mainImgElement.attr("src");
-    if (mainImgSrc) {
-      try {
-        mainImageUrl = new URL(mainImgSrc, BASE_URL).toString();
-        mainImageUrl = mainImageUrl.replace(/__\d+\//, "");
-        if (!mainImageUrl.includes("default-image.png")) {
-          imageUrls.push(mainImageUrl);
-        } else {
-          mainImageUrl = null;
-        }
-      } catch (e) {
-        console.warn(` -> Could not parse main image URL: ${mainImgSrc}`);
-      }
-    }
-
-    $("#single-item-card-left-column-thumbs img").each((_idx, thumbEl) => {
-      const $thumb = $(thumbEl);
-      const thumbDataPath = $thumb.attr("data-path");
-      const thumbFilename = $thumb.attr("data-filename");
-
-      if (thumbDataPath && thumbFilename) {
-        try {
-          const fullImageUrl = new URL(
-            thumbDataPath + thumbFilename,
-            BASE_URL
-          ).toString();
-          if (
-            !fullImageUrl.includes("default-image.png") &&
-            fullImageUrl !== mainImageUrl &&
-            !imageUrls.includes(fullImageUrl)
-          ) {
-            imageUrls.push(fullImageUrl);
-          }
-        } catch (e) {
-          console.warn(
-            ` -> Could not construct thumb image URL from path: ${thumbDataPath} and file: ${thumbFilename}`
-          );
-        }
-      }
-    });
-
-    if (imageUrls.length === 0) {
-      try {
-        imageUrls.push(new URL("/img/default-image.png", BASE_URL).toString());
-      } catch {}
-    }
-
-    return { manufacturerCode, isInStock, imageUrls };
+    return { manufacturerCode };
   } catch (error) {
     if (axios.isAxiosError(error)) {
       console.error(
@@ -173,15 +119,17 @@ async function scrapeProductDetails(url: string): Promise<{
         error
       );
     }
-    return { manufacturerCode: null, isInStock: false, imageUrls: [] };
+    return { manufacturerCode: null }; // Return null on error
   }
 }
 
+/**
+ * Fetches and parses a single catalog page to get base product info (including image, stock, and name-based SKU).
+ * @param url The URL of the catalog page.
+ * @returns An object containing a list of base product info and the next page URL.
+ */
 async function scrapeCatalogPage(url: string): Promise<{
-  productsBaseInfo: Omit<
-    Product,
-    "manufacturerCode" | "isInStock" | "imageUrls"
-  >[];
+  productsBaseInfo: Omit<Product, "manufacturerCode">[];
   nextPageUrl: string | null;
 }> {
   console.log(`Fetching catalog page: ${url}`);
@@ -201,14 +149,14 @@ async function scrapeCatalogPage(url: string): Promise<{
     });
 
     const $ = cheerio.load(html);
-    const productsBaseInfo: Omit<
-      Product,
-      "manufacturerCode" | "isInStock" | "imageUrls"
-    >[] = [];
+    const productsBaseInfo: Omit<Product, "manufacturerCode">[] = [];
 
     $(".product-grid .item").each((_index, element) => {
       const productElement = $(element);
+
       const name = productElement.find(".product-name").text().trim() || null;
+      const sku = name ? name.replace(/\s+/g, "-") : null; // Use name as SKU, replace spaces
+
       let siteCode: string | null = null;
       const codeText = productElement.find(".detail-code").text().trim();
       if (codeText) {
@@ -217,6 +165,7 @@ async function scrapeCatalogPage(url: string): Promise<{
           siteCode = codeMatch[1].trim();
         }
       }
+
       let price: number | null = null;
       const priceStr = productElement
         .find(".price .currency")
@@ -227,45 +176,60 @@ async function scrapeCatalogPage(url: string): Promise<{
           price = parsedPrice;
         }
       }
+
       let productPageUrl: string | null = null;
-      let sku: string | null = null;
       const relativeProductUrl = productElement
         .find(".product_info a")
         .attr("href");
       if (relativeProductUrl) {
         try {
           productPageUrl = new URL(relativeProductUrl, BASE_URL).toString();
-          const urlParts = productPageUrl.split("/");
-          const potentialId =
-            urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2];
-          if (potentialId && /^\d+$/.test(potentialId)) {
-            sku = potentialId;
-          } else {
-            console.warn(
-              `Could not extract numeric ID from product URL: ${productPageUrl}`
-            );
-          }
         } catch (e) {
           console.warn(
-            `Could not construct absolute URL or extract SKU for product page: ${relativeProductUrl}`
+            `Could not construct absolute URL for product page: ${relativeProductUrl}`
           );
         }
       }
 
-      if (name || siteCode || sku || price !== null || productPageUrl) {
-        if (!(name && siteCode && sku && price !== null && productPageUrl)) {
+      let imageUrl: string | null = null;
+      const imgElement = productElement.find(".img-holder img");
+      const relativeImageUrl = imgElement.attr("src");
+      if (relativeImageUrl) {
+        try {
+          imageUrl = new URL(relativeImageUrl, BASE_URL).toString();
+        } catch (e) {
           console.warn(
-            `Product has missing base data but will still be included: Name=${name}, SKU=${sku}, SiteCode=${siteCode}, Price=${price}, PageURL=${productPageUrl}`
+            `Could not construct absolute URL for image: ${relativeImageUrl}`
           );
         }
-        productsBaseInfo.push({
-          sku: sku || null,
-          siteCode: siteCode || null,
-          name: name || null,
-          price: price !== undefined ? price : null,
-          productPageUrl: productPageUrl || null,
+      }
+      if (!imageUrl) {
+        try {
+          imageUrl = new URL("/img/default-image.png", BASE_URL).toString();
+        } catch {}
+      }
+
+      let isInStock = false;
+      const availabilityDiv = productElement.find(".availability");
+      if (availabilityDiv.length > 0) {
+        availabilityDiv.find("span.green").each((_idx, el) => {
+          const stockText = $(el).text().trim();
+          if (/\d+/.test(stockText)) {
+            isInStock = true;
+            return false;
+          }
         });
       }
+
+      productsBaseInfo.push({
+        sku,
+        siteCode,
+        name,
+        price,
+        imageUrl,
+        productPageUrl,
+        isInStock, // Stock status from catalog
+      });
     });
 
     let nextPageUrl: string | null = null;
@@ -301,13 +265,18 @@ async function scrapeCatalogPage(url: string): Promise<{
   }
 }
 
+/**
+ * Converts the scraped product data into a CSV string formatted for WooCommerce.
+ * @param products Array of scraped Product objects.
+ * @returns A string containing the CSV data.
+ */
 function convertToWooCommerceCSV(products: Product[]): string {
   const wooCommerceData = products.map(
-    (product): WooCommerceProductRow => ({
-      ID: "",
+    (product, index): WooCommerceProductRow => ({
+      ID: (index + 1).toString(), // Automatic incrementing ID starting from 1
       Type: "simple",
-      SKU: product.sku || "",
-      Name: product.name || "",
+      SKU: product.sku || `MISSING-SKU-${index + 1}`, // Use name-based SKU, add fallback
+      Name: product.name || `Unnamed Product ${index + 1}`, // Add fallback name
       Published: "1",
       "Is featured?": "0",
       "Visibility in catalog": "visible",
@@ -335,7 +304,7 @@ function convertToWooCommerceCSV(products: Product[]): string {
       Categories: "",
       Tags: "",
       "Shipping class": "",
-      Images: product.imageUrls.join(","),
+      Images: product.imageUrl || "", // Use the single image URL
       "Download limit": "",
       "Download expiry days": "",
       Parent: "",
@@ -388,35 +357,41 @@ async function scrapeAllPages() {
     );
 
     for (let i = 0; i < productsBaseInfo.length; i++) {
+      // baseInfo contains: sku(name), siteCode, name, price, imageUrl, productPageUrl, isInStock
       const baseInfo = productsBaseInfo[i];
       console.log(
         ` [${catalogPageCount}-${i + 1}/${
           productsBaseInfo.length
-        }] Processing SKU: ${baseInfo.sku} (${baseInfo.name})`
+        }] Processing SKU: ${baseInfo.sku} (Stock: ${baseInfo.isInStock})`
       );
 
       if (!baseInfo.productPageUrl) {
         console.warn(
           ` -> Skipping detail fetch for product "${baseInfo.name}" (SKU: ${baseInfo.sku}) due to missing product page URL.`
         );
+        allProducts.push({
+          ...baseInfo,
+          manufacturerCode: null,
+        });
         continue;
       }
 
-      const { manufacturerCode, isInStock, imageUrls } =
-        await scrapeProductDetails(baseInfo.productPageUrl);
+      // Fetch only manufacturer code
+      const { manufacturerCode } = await scrapeProductDetails(
+        baseInfo.productPageUrl
+      );
 
+      // Combine base info (has stock, image, name-sku) with details (manufacturer code)
       const fullProductInfo: Product = {
         ...baseInfo,
         manufacturerCode: manufacturerCode,
-        isInStock: isInStock,
-        imageUrls: imageUrls,
       };
       allProducts.push(fullProductInfo);
 
       await new Promise((resolve) =>
         setTimeout(resolve, DELAY_BETWEEN_PRODUCT_REQUESTS_MS)
       );
-    }
+    } // End loop for products on page
 
     if (nextPageUrl === currentCatalogPageUrl) {
       console.log("Next catalog page URL is the same as current, stopping.");
@@ -426,7 +401,7 @@ async function scrapeAllPages() {
 
     // Optional longer delay between catalog pages
     // await new Promise(resolve => setTimeout(resolve, 2000));
-  }
+  } // End while loop for catalog pages
 
   if (catalogPageCount >= MAX_CATALOG_PAGES) {
     console.warn(
@@ -457,6 +432,7 @@ async function scrapeAllPages() {
   }
 }
 
+// --- Run the Scraper ---
 scrapeAllPages().catch((error) => {
   console.error("An unexpected error occurred during scraping:", error);
 });
